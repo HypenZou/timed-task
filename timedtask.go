@@ -8,7 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"timedtask/minidb"
+	tDB "timedtask/db"
+	errors "timedtask/errors"
 
 	"github.com/RussellLuo/timingwheel"
 )
@@ -24,26 +25,28 @@ type Serializable interface {
 }
 
 type TimedTask struct {
-	db    *minidb.MiniDB
-	tw    *timingwheel.TimingWheel
-	codec Serializable
-	fn    func(msg interface{})
-	mu    sync.RWMutex
+	db      *tDB.DB
+	tw      *timingwheel.TimingWheel
+	cache   *Cache
+	codec   Serializable
+	fn      func(msg interface{})
+	onClean bool
+	mu      sync.RWMutex
+	path    string
 }
-
-// var _ Stable = (*minidb.MiniDB)(nil)
 
 func NewTimedTask(dbFilePath string, codec Serializable) (*TimedTask, error) {
 	if err := makeFile(dbFilePath); err != nil {
 		return nil, err
 	}
-	db, err := minidb.Open(dbFilePath)
+	db, err := tDB.Open(dbFilePath)
 	if err != nil {
 		return nil, err
 	}
 	tw := timingwheel.NewTimingWheel(time.Millisecond, 20)
 	tw.Start()
-	timedtask := &TimedTask{db: db, codec: codec, tw: tw}
+	cache := NewCache()
+	timedtask := &TimedTask{db: db, codec: codec, tw: tw, path: dbFilePath, cache: cache}
 	return timedtask, nil
 }
 
@@ -53,7 +56,7 @@ func (timedtask *TimedTask) SetTask(fn func(msg interface{})) {
 
 func (timedtask *TimedTask) AddTrigger(d time.Duration, stableMsg interface{}) error {
 	if timedtask.fn == nil {
-		return NoTaskErr
+		return errors.ErrNoTask
 	}
 	expire := time.Now().Add(d)
 	t := time.Now().Add(d).UnixNano()
@@ -65,16 +68,16 @@ func (timedtask *TimedTask) AddTrigger(d time.Duration, stableMsg interface{}) e
 	defer timedtask.mu.RUnlock()
 	// 持久化
 	timedtask.db.Put([]byte(fmt.Sprint(t)), msg)
-
+	if timedtask.onClean {
+		timedtask.cache.Put([]byte(fmt.Sprint(t)), msg, PUT)
+	}
 	// 已经超时则直接执行
 	if time.Now().After(expire) {
-		timedtask.fn(stableMsg)
-		timedtask.db.Del([]byte(fmt.Sprint(t)))
+		timedtask.doTask(stableMsg, []byte(fmt.Sprint(t)))
 		return nil
 	}
 	timedtask.tw.AfterFunc(time.Until(expire), func() {
-		timedtask.fn(stableMsg)
-		timedtask.db.Del([]byte(fmt.Sprint(t)))
+		timedtask.doTask(stableMsg, []byte(fmt.Sprint(t)))
 	})
 	return nil
 }
@@ -96,7 +99,6 @@ func (timedtask *TimedTask) Recover() error {
 		if time.Now().After(t) {
 			continue
 		}
-		fmt.Println(t)
 		timedtask.tw.AfterFunc(time.Until(t), func() {
 			timedtask.fn(msg)
 			timedtask.db.Del([]byte(fmt.Sprint(t)))
@@ -105,19 +107,47 @@ func (timedtask *TimedTask) Recover() error {
 	return nil
 }
 
-// func (timedtask *TimedTask) Clean() error {
-// 	timedtask.mu.Lock()
-// 	defer timedtask.mu.Unlock()
-// 	keys := timedtask.db.GetAll()
-// 	if err != nil {
-// 		return err
-// 	}
-// 	timedtask.onClean = true
-// 	for i := range keys {
-// 		timedtask.db.Get([]byte(keys[i]))
-// 		newDb.Put([]byte(keys[i]))
-// 	}
-// }
+func (timedtask *TimedTask) Clean() error {
+	newDb, err := tDB.Open("clean")
+	if err != nil {
+		return err
+	}
+	keys := timedtask.db.GetAll()
+	timedtask.onClean = true
+	for i := range keys {
+		v, err := timedtask.db.Get([]byte(keys[i]))
+		if err == errors.ErrNotFound {
+			continue
+		}
+		newDb.Put([]byte(keys[i]), v)
+	}
+	for !timedtask.cache.IsEmpty() {
+		key, value, method := timedtask.cache.Get()
+		if method == PUT {
+			newDb.Put(key, value)
+		}
+		if method == DEL {
+			newDb.Del(key)
+		}
+	}
+	time.Sleep(time.Second)
+	timedtask.mu.Lock()
+	timedtask.db = newDb
+	os.RemoveAll(timedtask.path)
+	os.Rename("clean", timedtask.path)
+	timedtask.mu.Unlock()
+	return nil
+}
+
+func (timedtask *TimedTask) doTask(stableMsg interface{}, key []byte) {
+	timedtask.mu.RLock()
+	defer timedtask.mu.RUnlock()
+	timedtask.fn(stableMsg)
+	timedtask.db.Del(key)
+	if timedtask.onClean {
+		timedtask.cache.Put(key, nil, DEL)
+	}
+}
 
 func makeFile(path string) error {
 	_, err := os.Stat(path)
