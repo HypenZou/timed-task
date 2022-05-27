@@ -130,7 +130,6 @@ func (timedtask *TimedTask) Clean() error {
 			newDb.Del(key)
 		}
 	}
-	time.Sleep(time.Second)
 	timedtask.mu.Lock()
 	timedtask.db = newDb
 	os.RemoveAll(timedtask.path)
