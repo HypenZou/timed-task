@@ -1,6 +1,9 @@
 package timedtask
 
-import "sync"
+import (
+	"sync"
+	"timedtask/errors"
+)
 
 const (
 	PUT uint16 = iota
@@ -28,13 +31,17 @@ func (ca *Cache) Put(key, value []byte, method uint16) {
 	ca.mu.Unlock()
 }
 
-func (ca *Cache) Get() (key, value []byte, method uint16) {
+func (ca *Cache) Get() (key, value []byte, method uint16, err error) {
 	ca.mu.Lock()
+	defer ca.mu.Unlock()
+	if len(ca.buf) == 0 {
+		err = errors.ErrNotFound
+		return
+	}
 	key = ca.buf[0].key
 	value = ca.buf[0].value
 	method = ca.buf[0].method
 	ca.buf = ca.buf[1:]
-	ca.mu.Unlock()
 	return
 }
 

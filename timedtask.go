@@ -54,34 +54,6 @@ func (timedtask *TimedTask) SetTask(fn func(msg interface{})) {
 	timedtask.fn = fn
 }
 
-func (timedtask *TimedTask) AddTrigger(d time.Duration, stableMsg interface{}) error {
-	if timedtask.fn == nil {
-		return errors.ErrNoTask
-	}
-	expire := time.Now().Add(d)
-	t := time.Now().Add(d).UnixNano()
-	msg, err := timedtask.codec.Serialize(stableMsg)
-	if err != nil {
-		return err
-	}
-	timedtask.mu.RLock()
-	defer timedtask.mu.RUnlock()
-	// 持久化
-	timedtask.db.Put([]byte(fmt.Sprint(t)), msg)
-	if timedtask.onClean {
-		timedtask.cache.Put([]byte(fmt.Sprint(t)), msg, PUT)
-	}
-	// 已经超时则直接执行
-	if time.Now().After(expire) {
-		timedtask.doTask(stableMsg, []byte(fmt.Sprint(t)))
-		return nil
-	}
-	timedtask.tw.AfterFunc(time.Until(expire), func() {
-		timedtask.doTask(stableMsg, []byte(fmt.Sprint(t)))
-	})
-	return nil
-}
-
 func (timedtask *TimedTask) Recover() error {
 	keys := timedtask.db.GetAll()
 	for i := range keys {
@@ -107,6 +79,15 @@ func (timedtask *TimedTask) Recover() error {
 	return nil
 }
 
+func (timedtask *TimedTask) TriggerAfter(d time.Duration, stableMsg interface{}) error {
+	return timedtask.addTriggerWithDuration(d, stableMsg)
+}
+
+func (timedtask *TimedTask) TriggerWhen(t time.Time, stableMsg interface{}) error {
+	d := time.Until(t)
+	return timedtask.addTriggerWithDuration(d, stableMsg)
+}
+
 func (timedtask *TimedTask) Clean() error {
 	newDb, err := tDB.Open("clean")
 	if err != nil {
@@ -122,7 +103,7 @@ func (timedtask *TimedTask) Clean() error {
 		newDb.Put([]byte(keys[i]), v)
 	}
 	for !timedtask.cache.IsEmpty() {
-		key, value, method := timedtask.cache.Get()
+		key, value, method, _ := timedtask.cache.Get()
 		if method == PUT {
 			newDb.Put(key, value)
 		}
@@ -146,6 +127,34 @@ func (timedtask *TimedTask) doTask(stableMsg interface{}, key []byte) {
 	if timedtask.onClean {
 		timedtask.cache.Put(key, nil, DEL)
 	}
+}
+
+func (timedtask *TimedTask) addTriggerWithDuration(d time.Duration, stableMsg interface{}) error {
+	if timedtask.fn == nil {
+		return errors.ErrNoTask
+	}
+	expire := time.Now().Add(d)
+	t := time.Now().Add(d).UnixNano()
+	msg, err := timedtask.codec.Serialize(stableMsg)
+	if err != nil {
+		return err
+	}
+	timedtask.mu.RLock()
+	defer timedtask.mu.RUnlock()
+	// 持久化
+	timedtask.db.Put([]byte(fmt.Sprint(t)), msg)
+	if timedtask.onClean {
+		timedtask.cache.Put([]byte(fmt.Sprint(t)), msg, PUT)
+	}
+	// 已经超时则直接执行
+	if time.Now().After(expire) {
+		timedtask.doTask(stableMsg, []byte(fmt.Sprint(t)))
+		return nil
+	}
+	timedtask.tw.AfterFunc(time.Until(expire), func() {
+		timedtask.doTask(stableMsg, []byte(fmt.Sprint(t)))
+	})
+	return nil
 }
 
 func makeFile(path string) error {

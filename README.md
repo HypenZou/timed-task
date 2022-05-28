@@ -46,3 +46,14 @@ func TestTimedTask(t *testing.T) {
 }
 
 ```
+
+if you want to do fixed-duration task , you can use this way:
+
+```go
+
+
+
+
+
+
+```
