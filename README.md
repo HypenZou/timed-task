@@ -47,13 +47,32 @@ func TestTimedTask(t *testing.T) {
 
 ```
 
-if you want to do fixed-duration task , you can use this way:
+And if you want to do fixed-duration task , you can use this way:
 
 ```go
-
-
-
-
-
+	var se serialize
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(time.Minute * 10)
+		cancel()
+	}()
+	timedtask, err := NewTimedTask("tmp", &se)
+	if err != nil {
+		log.Printf("new timedtask faild : %s", err)
+	}
+	err = timedtask.Recover()
+	if err != nil {
+		log.Printf("recover faild : %s", err)
+	}
+	timedtask.SetTask(func(msg interface{}) {
+		// do something
+		t := time.Now()
+		fmt.Println("触发误差:", t.Sub(msg.(time.Time)), "触发时间:", msg.(time.Time))
+		// 添加下一次
+		timedtask.TriggerAfter(time.Second, time.Now().Add(time.Second))
+	})
+	triggerTime, _ := time.ParseInLocation("2006-01-02 15:04:05", "2022-05-28 09:42:11", time.Local)
+	timedtask.TriggerWhen(triggerTime, triggerTime)
+	<-ctx.Done()
 
 ```
